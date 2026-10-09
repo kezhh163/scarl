@@ -1,0 +1,9 @@
+# SEED-GRPO Ray runtime environment (mirrors scarl_trainer/runtime_env.yaml).
+working_dir: ./
+excludes: ["/.git/"]
+env_vars:
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  NCCL_TIMEOUT: "7200"
+  NCCL_IB_TIMEOUT: "23"
+  # math-verify timeout (seconds)
+  MATH_VERIFY_TIMEOUT: "2"

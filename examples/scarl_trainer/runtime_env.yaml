@@ -1,0 +1,16 @@
+# GRPO 专用 Ray 运行时环境配置
+working_dir: ./
+excludes: ["/.git/"]
+env_vars:
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  # NCCL配置：降低通信压力并提高超时限制
+  # NCCL_NVLS_ENABLE: "0"
+  # NCCL_ASYNC_ERROR_HANDLING: "1"
+  # NCCL_BLOCKING_WAIT: "1"
+  NCCL_TIMEOUT: "7200"
+  # TORCH_NCCL_BLOCKING_WAIT: "1"
+  NCCL_IB_TIMEOUT: "23"
+  # math-verify 超时配置（秒），默认 2 秒
+  MATH_VERIFY_TIMEOUT: "2"
+  # If you are using vllm<=0.6.3, you might need to set the following environment variable to avoid bugs:
+  # VLLM_ATTENTION_BACKEND: "XFORMERS"
