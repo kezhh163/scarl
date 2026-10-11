@@ -118,6 +118,7 @@ class AdvantageEstimator(str, Enum):
     SCARL = "scarl"
     SEED_GRPO = "seed_grpo"
     UCAS = "ucas"
+    CDE = "cde"
 
 
 def _normalize_kl_certainty(
@@ -2182,3 +2183,160 @@ def compute_pf_ppo_reweight_data(
     resampled_data.meta_info = resampled_meta_info
 
     return resampled_data
+
+
+# =====================================================================
+# CDE baseline: actor-side perplexity (PPL) bonus.
+#
+# Dai et al., "CDE: Curiosity-Driven Exploration for Efficient
+# Reinforcement Learning in Large Language Models", ICLR 2026
+# (arXiv:2509.09675). Only the actor-side bonus applies to critic-free
+# estimators; the multi-head critic bonus is PPO-specific and is not
+# ported. Dedicated code path: the shared estimators above are untouched
+# and are only called.
+#
+#   B(q, o)       = -(1/T) sum_t log pi(o_t | o_<t, q)                (Eq. 1)
+#   r~(q, o)      = r(q, o) + omega_t * min(|r(q, o)| / kappa, alpha * B)   (Eq. 2)
+#
+# The shaped reward r~ then goes through the unmodified GRPO group
+# normalization. Paper configuration for the PPL bonus (Table 4b):
+# kappa = 3, alpha = 1, omega_t = staircase decay (Figure 7: omega = 1
+# for the first half of training, 0 afterwards). B is computed from the
+# behavior-policy log-probs already materialized for the importance
+# ratios (`old_log_probs`), the same source as SCARL's confidence.
+# =====================================================================
+
+
+def cde_bonus_weight(
+    step_fraction: float,
+    omega: float = 1.0,
+    schedule: str = "staircase",
+    decay_fraction: float = 0.5,
+) -> float:
+    """Bonus weight omega_t of CDE's PPL bonus at a point of training.
+
+    Args:
+        step_fraction: fraction of training completed before the current
+            step, in [0, 1).
+        omega: initial bonus weight (1.0 in the paper's Figure 7).
+        schedule: "staircase" (paper's recommended setting), "linear",
+            "cosine", or "none" (the paper's "No decay").
+        decay_fraction: fraction of training over which omega decays;
+            Figure 7 decays over the first half (step 150 of 300).
+    """
+    schedule = (schedule or "staircase").lower()
+    if schedule in ("none", "constant", "no_decay"):
+        return float(omega)
+    if decay_fraction <= 0:
+        return 0.0
+    progress = min(max(step_fraction / decay_fraction, 0.0), 1.0)
+    if schedule == "staircase":
+        return float(omega) if progress < 1.0 else 0.0
+    if schedule == "linear":
+        return float(omega) * (1.0 - progress)
+    if schedule == "cosine":
+        return float(omega) * 0.5 * (1.0 + float(np.cos(np.pi * progress)))
+    raise ValueError(f"Unknown CDE omega schedule: {schedule!r}")
+
+
+def compute_cde_ppl_bonus(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    omega_t: float,
+    kappa: float = 3.0,
+    alpha: float = 1.0,
+):
+    """Per-response PPL bonus of CDE (Eqs. 1-2).
+
+    Returns:
+        bonus: `(bs,)` omega_t * min(|r| / kappa, alpha * B)
+        ppl:   `(bs,)` B, the mean negative token log-probability of the
+               response under the behavior policy (log-perplexity)
+        cap:   `(bs,)` |r| / kappa
+    """
+    scores = token_level_rewards.sum(dim=-1)
+    mask = response_mask.to(old_log_probs.dtype)
+    n_tokens = mask.sum(dim=-1).clamp(min=1.0)
+    ppl = -(old_log_probs * mask).sum(dim=-1) / n_tokens
+    cap = scores.abs() / kappa
+    bonus = omega_t * torch.minimum(cap, alpha * ppl)
+    return bonus, ppl, cap
+
+
+@register_adv_est(AdvantageEstimator.CDE)
+def compute_cde_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    old_log_probs: torch.Tensor,
+    step_fraction: float = 0.0,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+    config=None,
+    **kwargs,
+):
+    """GRPO outcome advantage on CDE's bonus-shaped reward.
+
+    The bonus is added to each response's outcome reward at its last
+    valid token, and the shaped rewards are passed through the unmodified
+    `compute_grpo_outcome_advantage`, so the group normalization is
+    exactly GRPO's.
+
+    Config keys (read with the paper's values as defaults):
+        cde_kappa (3.0), cde_alpha (1.0), cde_omega (1.0),
+        cde_omega_schedule ("staircase"), cde_omega_decay_fraction (0.5).
+
+    Returns:
+        advantages, returns: `(bs, response_length)`
+        metrics: dict of "cde/..." diagnostics
+    """
+    get = (lambda k, d: config.get(k, d)) if config is not None else (lambda k, d: d)
+    kappa = float(get("cde_kappa", 3.0))
+    alpha = float(get("cde_alpha", 1.0))
+    omega = float(get("cde_omega", 1.0))
+    schedule = str(get("cde_omega_schedule", "staircase"))
+    decay_fraction = float(get("cde_omega_decay_fraction", 0.5))
+    omega_t = cde_bonus_weight(step_fraction, omega=omega, schedule=schedule, decay_fraction=decay_fraction)
+
+    with torch.no_grad():
+        bonus, ppl, cap = compute_cde_ppl_bonus(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            old_log_probs=old_log_probs,
+            omega_t=omega_t,
+            kappa=kappa,
+            alpha=alpha,
+        )
+        shaped_rewards = token_level_rewards.clone()
+        last_valid = (response_mask.sum(dim=-1).long() - 1).clamp(min=0)
+        rows = torch.arange(shaped_rewards.shape[0], device=shaped_rewards.device)
+        shaped_rewards[rows, last_valid] += bonus.to(shaped_rewards.dtype)
+
+        advantages, returns = compute_grpo_outcome_advantage(
+            token_level_rewards=shaped_rewards,
+            response_mask=response_mask,
+            index=index,
+            epsilon=epsilon,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        )
+
+        scores = token_level_rewards.sum(dim=-1)
+        pos = scores > 0
+        neg = ~pos
+
+        def _mean(x, m):
+            return x[m].mean().item() if bool(m.any()) else 0.0
+
+        metrics = {
+            "cde/omega_t": omega_t,
+            "cde/bonus_mean": bonus.mean().item(),
+            "cde/bonus_mean_pos": _mean(bonus, pos),
+            "cde/bonus_mean_neg": _mean(bonus, neg),
+            "cde/ppl_mean": ppl.mean().item(),
+            "cde/ppl_mean_pos": _mean(ppl, pos),
+            "cde/ppl_mean_neg": _mean(ppl, neg),
+            "cde/cap_active_frac": (cap < alpha * ppl).float().mean().item(),
+        }
+
+    return advantages, returns, metrics

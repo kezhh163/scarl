@@ -329,6 +329,11 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 self.tokenizer,
                                 mode=self.config.algorithm.get("seed_grpo_answer_extractor", "auto"),
                             )
+                        if self.config.algorithm.adv_estimator == AdvantageEstimator.CDE:
+                            # CDE: the PPL-bonus weight is scheduled by training progress
+                            batch.meta_info["cde_step_fraction"] = (self.global_steps - 1) / max(
+                                self.total_training_steps, 1
+                            )
                         batch = compute_advantage(
                             batch,
                             adv_estimator=self.config.algorithm.adv_estimator,
@@ -343,6 +348,8 @@ class RayDAPOTrainer(RayPPOTrainer):
                             metrics.update(batch.meta_info["scarl_metrics"])
                         if "seed_grpo_metrics" in batch.meta_info:
                             metrics.update(batch.meta_info["seed_grpo_metrics"])
+                        if "cde_metrics" in batch.meta_info:
+                            metrics.update(batch.meta_info["cde_metrics"])
 
                     # update critic
                     if self.use_critic:

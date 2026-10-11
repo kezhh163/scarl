@@ -22,11 +22,12 @@ only what the paper adds.
 
 | Path | Content |
 |---|---|
-| `verl/trainer/ppo/core_algos.py` | SCARL estimator (`compute_scarl_outcome_advantage` and the weight computation) plus all baseline estimators, including the ported UCAS baseline (`compute_ucas_advantage`) |
+| `verl/trainer/ppo/core_algos.py` | SCARL estimator (`compute_scarl_outcome_advantage` and the weight computation) plus all baseline estimators, including the ported UCAS baseline (`compute_ucas_advantage`) and the CDE PPL-bonus baseline (`compute_cde_outcome_advantage`) |
 | `verl/workers/actor/dp_actor.py` | Single-forward log-prob + selected-logits path (SCARL's optional `logit` mode); dedicated UCAS forward (adds KL(U&#124;&#124;p) self-certainty) |
 | `verl/trainer/ppo/ray_trainer.py`, `recipe/dapo/dapo_ray_trainer.py` | Advantage dispatch and training-loop wiring |
 | `examples/scarl_trainer/` | SCARL run scripts for all four base estimators (see its README) |
 | `examples/ucas_trainer/`, `examples/{grpo,gspo,sapo,dr_grpo,seed_grpo,entropy_adv_shaping}_trainer/`, `recipe/dapo/` | Run scripts for the nine compute-matched methods |
+| `examples/cde_trainer/` | CDE (actor-side PPL bonus, Dai et al., ICLR 2026) on the GRPO and DAPO bases, same shared recipe (see its README) |
 | `recipe/dapo/prepare_dapo_data.sh` | Downloads the pinned public training and evaluation parquets |
 
 ## Installation
@@ -52,7 +53,7 @@ paper use a single node with 8x NVIDIA A100 40GB GPUs.
 
 All data are public Hugging Face releases with pre-rendered,
 chat-format prompts (a single user turn; templates are reproduced in
-the paper's technical supplement):
+the paper's appendix):
 
 - **Training**: `dapo-math-17k-processed-all.parquet` from
   `open-r1/DAPO-Math-17k-Processed` (config `all`), a deduplicated
@@ -106,7 +107,7 @@ batch 512, evaluation of 32 samples per problem every 5 steps).
 | `algorithm.scarl_lam`, `algorithm.scarl_power` | `1`, `1` | Identity defaults retained for config compatibility; at these values both are no-ops, so the executed computation matches the paper's single-hyperparameter description |
 
 Baseline scripts follow each method's published recipe; per-estimator
-settings are tabulated in the paper's technical supplement.
+settings are tabulated in the paper's appendix.
 
 ## License
 

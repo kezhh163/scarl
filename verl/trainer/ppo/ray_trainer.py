@@ -449,6 +449,25 @@ def compute_advantage(
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.CDE:
+        # CDE: GRPO advantage on the PPL-bonus-shaped reward (dedicated estimator path)
+        cde_calculation_mask = data.batch["response_mask"]
+        if multi_turn:
+            response_length = cde_calculation_mask.size(1)
+            cde_calculation_mask = data.batch["loss_mask"][:, -response_length:]
+
+        advantages, returns, cde_metrics = core_algos.compute_cde_outcome_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=cde_calculation_mask,
+            index=data.non_tensor_batch["uid"],
+            old_log_probs=data.batch["old_log_probs"],
+            step_fraction=float(data.meta_info.get("cde_step_fraction", 0.0)),
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            config=config,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+        data.meta_info["cde_metrics"] = cde_metrics
     elif adv_estimator == AdvantageEstimator.SEED_GRPO:
         # SEED-GRPO: prompt-level Semantic Entropy modulated (Dr.)GRPO advantage.
         # Faithful port of https://github.com/AndyLiao404/SEED-GRPO.
@@ -610,6 +629,7 @@ class RayPPOTrainer:
             AdvantageEstimator.SCARL,
             AdvantageEstimator.SEED_GRPO,
             AdvantageEstimator.UCAS,
+            AdvantageEstimator.CDE,
         ]:
             self.use_critic = False
         else:
@@ -1552,6 +1572,11 @@ class RayPPOTrainer:
                                 self.tokenizer,
                                 mode=self.config.algorithm.get("seed_grpo_answer_extractor", "auto"),
                             )
+                        if self.config.algorithm.adv_estimator == AdvantageEstimator.CDE:
+                            # CDE: the PPL-bonus weight is scheduled by training progress
+                            batch.meta_info["cde_step_fraction"] = (self.global_steps - 1) / max(
+                                self.total_training_steps, 1
+                            )
 
                         batch = compute_advantage(
                             batch,
@@ -1563,6 +1588,8 @@ class RayPPOTrainer:
                             multi_turn=self.config.actor_rollout_ref.rollout.multi_turn.enable,
                             config=self.config.algorithm,
                         )
+                        if "cde_metrics" in batch.meta_info:
+                            metrics.update(batch.meta_info["cde_metrics"])
 
                     # update critic
                     if self.use_critic:
